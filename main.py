@@ -17,6 +17,8 @@ def main():
 
     subparsers.add_parser("status", help="show current live network state")
 
+    subparsers.add_parser("diff", help="compare config with live network state")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -25,6 +27,8 @@ def main():
         cmd_show(args.iface)
     elif args.command == "status":
         cmd_status()
+    elif args.command == "diff":
+        cmd_diff()
     else:
         parser.print_help()
 
@@ -56,8 +60,77 @@ def cmd_status():
         print(f"{name}: {addrs}")
 
     print("-- routes --")
-    for line in routes:
-        print(line)
+    for route in routes:
+        print(format_route_line(route))
+
+
+def cmd_diff():
+    live_addresses = get_live_addresses()
+    live_routes = get_live_routes()
+
+    for item in NETWORK.iterdir():
+        if not item.is_dir():
+            continue
+
+        name = item.name
+        iface = read_iface(item)
+
+        print(f"== {name} ==")
+        diff_addresses(iface, live_addresses.get(name, []))
+        diff_routes(iface, live_routes, name)
+
+
+def diff_addresses(iface, live_addrs):
+    config_ips = set()
+    for addr in iface["ipv4address"]:
+        ip, sep, mask = addr.partition("/")
+        config_ips.add(ip)
+
+    live_ips = set(live_addrs)
+
+    missing = config_ips - live_ips
+    extra = live_ips - config_ips
+
+    if not missing and not extra:
+        print("  addresses match")
+        return
+
+    for ip in sorted(missing):
+        print(f"  address in config but not live: {ip}")
+    for ip in sorted(extra):
+        print(f"  address live but not in config: {ip}")
+
+
+def diff_routes(iface, live_routes, name):
+    config_routes = set(iface["ipv4route"])
+
+    live_routes_for_iface = set()
+    for route in live_routes:
+        if route.get("dev") != name:
+            continue
+        live_routes_for_iface.add(route_core(route))
+
+    missing = config_routes - live_routes_for_iface
+    extra = live_routes_for_iface - config_routes
+
+    if not missing and not extra:
+        print("  routes match")
+        return
+
+    for line in sorted(missing):
+        print(f"  route in config but not live: {line}")
+    for line in sorted(extra):
+        print(f"  route live but not in config: {line}")
+
+
+def route_core(route):
+    dst = route.get("dst", "unknown")
+    gateway = route.get("gateway")
+
+    line = f"{dst}"
+    if gateway:
+        line += f" via {gateway}"
+    return line
 
 
 def read_iface(item):
@@ -139,24 +212,18 @@ def get_live_routes():
         text=True,
         check=True
     )
-    routes = json.loads(result.stdout)
+    return json.loads(result.stdout)
 
-    lines = []
-    for route in routes:
-        dst = route.get('dst', 'unknown')
-        dev = route.get('dev', '?')
-        gateway = route.get('gateway')
-        metric = route.get('metric')
 
-        line = f"{dst}"
-        if gateway:
-            line += f" via {gateway}"
-        line += f" dev {dev}"
-        if metric is not None:
-            line += f" metric {metric}"
+def format_route_line(route):
+    dev = route.get('dev', '?')
+    metric = route.get('metric')
 
-        lines.append(line)
-    return lines
+    line = route_core(route)
+    line += f" dev {dev}"
+    if metric is not None:
+        line += f" metric {metric}"
+    return line
 
 
 if __name__ == "__main__":
