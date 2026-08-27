@@ -102,7 +102,9 @@ def diff_addresses(iface, live_addrs):
 
 
 def diff_routes(iface, live_routes, name):
-    config_routes = set(iface["ipv4route"])
+    config_routes = set()
+    for route in iface["ipv4route"]:
+        config_routes.add(route_core(route))
 
     live_routes_for_iface = set()
     for route in live_routes:
@@ -182,8 +184,20 @@ def parse_ipv4route(item):
     for line in text.splitlines():
         line = line.strip()
         if line:
-            result.append(line)
+            result.append(parse_route_line(line))
     return result
+
+
+def parse_route_line(line):
+    tokens = line.split()
+    dst = tokens[0]
+
+    gateway = None
+    if "via" in tokens:
+        via_index = tokens.index("via")
+        gateway = tokens[via_index + 1]
+
+    return {"dst": dst, "gateway": gateway}
 
 
 def get_live_addresses():
