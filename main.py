@@ -1,7 +1,9 @@
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
+import ipaddress
 
 NETWORK = Path('testdata/ifaces/')
 
@@ -10,21 +12,35 @@ def main():
     parser = argparse.ArgumentParser(description="etcnetpy - network configuration for /etc/net")
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("list", help="list interfaces from config")
+    iface_parser = subparsers.add_parser("iface", help="interface config")
+    iface_subparsers = iface_parser.add_subparsers(dest="action")
+    iface_subparsers.add_parser("list", help="list interfaces from config")
+    iface_show_parser = iface_subparsers.add_parser("show", help="show config for one interface")
+    iface_show_parser.add_argument("iface", help="interface name, e.g. eth0")
 
-    show_parser = subparsers.add_parser("show", help="show config for one interface")
-    show_parser.add_argument("iface", help="interface name, e.g. eth0")
+    address_parser = subparsers.add_parser("address", help="ipv4 address config")
+    address_subparsers = address_parser.add_subparsers(dest="action")
+    address_add_parser = address_subparsers.add_parser("add", help="add ipv4 address to interface config")
+    address_add_parser.add_argument("iface", help="interface name, e.g. eth0")
+    address_add_parser.add_argument("ip", help="ip address with mask, e.g. 192.168.1.10/24")
 
     subparsers.add_parser("status", help="show current live network state")
-
     subparsers.add_parser("diff", help="compare config with live network state")
 
     args = parser.parse_args()
 
-    if args.command == "list":
-        cmd_list()
-    elif args.command == "show":
-        cmd_show(args.iface)
+    if args.command == "iface":
+        if args.action == "list":
+            cmd_list()
+        elif args.action == "show":
+            cmd_show(args.iface)
+        else:
+            iface_parser.print_help()
+    elif args.command == "address":
+        if args.action == "add":
+            cmd_address(args.iface, args.ip)
+        else:
+            address_parser.print_help()
     elif args.command == "status":
         cmd_status()
     elif args.command == "diff":
@@ -43,13 +59,40 @@ def cmd_show(iface_name):
     item = NETWORK / iface_name
     if not item.is_dir():
         print(f"interface not found: {iface_name}")
-        return
+        sys.exit(1)
 
     iface = read_iface(item)
     print(f"options: {iface['options']}")
     print(f"ipv4address: {iface['ipv4address']}")
     print(f"ipv4route: {iface['ipv4route']}")
 
+
+def cmd_address(iface_name, addr):
+    item = NETWORK / iface_name
+    if not item.is_dir():
+        print(f"interface not found: {iface_name}")
+        sys.exit(1)
+
+    write_address(item, addr)
+
+
+def write_address(item, addr):
+    try:
+        ipaddress.ip_interface(addr)
+    except ValueError:
+        print(f"invalid address: {addr}")
+        sys.exit(1)
+
+    existing = parse_ipv4address(item)
+    if addr in existing:
+        print(f"address already present: {addr}")
+        return
+
+    path = item / "ipv4address"
+    lines = existing + [addr]
+    path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+
+    print(f"added {addr} to {item.name}")
 
 def cmd_status():
     addresses = get_live_addresses()
@@ -80,10 +123,12 @@ def cmd_diff():
         diff_routes(iface, live_routes, name)
 
 
+
+
 def diff_addresses(iface, live_addrs):
     config_ips = set()
     for addr in iface["ipv4address"]:
-        ip, sep, mask = addr.partition("/")
+        ip, _, _ = addr.partition("/")
         config_ips.add(ip)
 
     live_ips = set(live_addrs)
@@ -238,7 +283,6 @@ def format_route_line(route):
     if metric is not None:
         line += f" metric {metric}"
     return line
-
 
 if __name__ == "__main__":
     main()
