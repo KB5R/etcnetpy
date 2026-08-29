@@ -25,6 +25,15 @@ def main():
     address_add_parser.add_argument("ip", help="ip address with mask, e.g. 192.168.1.10/24")
     address_add_parser.add_argument("--replace", action="store_true", help="replace existing addresses instead of appending")
 
+    route_parser = subparsers.add_parser("route", help="ipv4 route config")
+    route_subparsers = route_parser.add_subparsers(dest="action")
+    route_add_parser = route_subparsers.add_parser("add", help="add ipv4 route to interface config")
+    route_add_parser.add_argument("iface", help="interface name, e.g. eth0")
+    route_add_parser.add_argument("dst", help="destination, e.g. default or 192.168.2.0/24")
+    route_add_parser.add_argument("via", choices=["via"], help="literal 'via'")
+    route_add_parser.add_argument("gateway", help="gateway ip, e.g. 192.168.1.1")
+    route_add_parser.add_argument("--replace", action="store_true", help="replace existing routes instead of appending")
+
     subparsers.add_parser("status", help="show current live network state")
     subparsers.add_parser("diff", help="compare config with live network state")
 
@@ -42,6 +51,11 @@ def main():
             cmd_address(args.iface, args.ip, args.replace)
         else:
             address_parser.print_help()
+    elif args.command == "route":
+        if args.action == "add":
+            cmd_route(args.iface, args.dst, args.gateway, args.replace)
+        else:
+            route_parser.print_help()
     elif args.command == "status":
         cmd_status()
     elif args.command == "diff":
@@ -105,6 +119,52 @@ def write_address(item, addr, replace=False):
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
     print(f"added {addr} to {item.name}")
+
+
+def cmd_route(iface_name, dst, gateway, replace=False):
+    item = NETWORK / iface_name
+    if not item.is_dir():
+        print(f"interface not found: {iface_name}")
+        sys.exit(1)
+
+    write_route(item, dst, gateway, replace)
+
+
+def write_route(item, dst, gateway, replace=False):
+    if dst != "default":
+        try:
+            ipaddress.ip_network(dst, strict=False)
+        except ValueError:
+            print(f"invalid destination: {dst}")
+            sys.exit(1)
+
+    try:
+        ipaddress.ip_address(gateway)
+    except ValueError:
+        print(f"invalid gateway: {gateway}")
+        sys.exit(1)
+
+    line = route_core({"dst": dst, "gateway": gateway})
+
+    existing_routes = parse_ipv4route(item)
+    existing_lines = [route_core(route) for route in existing_routes]
+
+    if replace:
+        if existing_lines == [line]:
+            print(f"route already present: {line}")
+            return
+        lines = [line]
+    else:
+        if line in existing_lines:
+            print(f"route already present: {line}")
+            return
+        lines = existing_lines + [line]
+
+    path = item / "ipv4route"
+    path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+
+    print(f"added route '{line}' to {item.name}")
+
 
 def cmd_status():
     addresses = get_live_addresses()
