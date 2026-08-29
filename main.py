@@ -23,6 +23,7 @@ def main():
     address_add_parser = address_subparsers.add_parser("add", help="add ipv4 address to interface config")
     address_add_parser.add_argument("iface", help="interface name, e.g. eth0")
     address_add_parser.add_argument("ip", help="ip address with mask, e.g. 192.168.1.10/24")
+    address_add_parser.add_argument("--replace", action="store_true", help="replace existing addresses instead of appending")
 
     subparsers.add_parser("status", help="show current live network state")
     subparsers.add_parser("diff", help="compare config with live network state")
@@ -38,7 +39,7 @@ def main():
             iface_parser.print_help()
     elif args.command == "address":
         if args.action == "add":
-            cmd_address(args.iface, args.ip)
+            cmd_address(args.iface, args.ip, args.replace)
         else:
             address_parser.print_help()
     elif args.command == "status":
@@ -67,16 +68,20 @@ def cmd_show(iface_name):
     print(f"ipv4route: {iface['ipv4route']}")
 
 
-def cmd_address(iface_name, addr):
+def cmd_address(iface_name, addr, replace=False):
     item = NETWORK / iface_name
     if not item.is_dir():
         print(f"interface not found: {iface_name}")
         sys.exit(1)
 
-    write_address(item, addr)
+    write_address(item, addr, replace)
 
 
-def write_address(item, addr):
+def write_address(item, addr, replace=False):
+    if "/" not in addr:
+        print(f"invalid address: {addr} (mask required, e.g. 192.168.1.10/24)")
+        sys.exit(1)
+
     try:
         ipaddress.ip_interface(addr)
     except ValueError:
@@ -84,12 +89,19 @@ def write_address(item, addr):
         sys.exit(1)
 
     existing = parse_ipv4address(item)
-    if addr in existing:
-        print(f"address already present: {addr}")
-        return
+
+    if replace:
+        if existing == [addr]:
+            print(f"address already present: {addr}")
+            return
+        lines = [addr]
+    else:
+        if addr in existing:
+            print(f"address already present: {addr}")
+            return
+        lines = existing + [addr]
 
     path = item / "ipv4address"
-    lines = existing + [addr]
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
     print(f"added {addr} to {item.name}")
