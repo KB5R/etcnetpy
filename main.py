@@ -34,6 +34,18 @@ def main():
     route_add_parser.add_argument("gateway", help="gateway ip, e.g. 192.168.1.1")
     route_add_parser.add_argument("--replace", action="store_true", help="replace existing routes instead of appending")
 
+    bond_parser = subparsers.add_parser("bond", help="bond interface config")
+    bond_subparsers = bond_parser.add_subparsers(dest="action")
+    bond_create_parser = bond_subparsers.add_parser("create", help="create a bonded interface (802.3ad)")
+    bond_create_parser.add_argument("name", help="bond interface name, e.g. bond0")
+    bond_create_parser.add_argument("--slave", nargs="+", required=True, help="slave interfaces, e.g. eth0 eth1")
+
+    vlan_parser = subparsers.add_parser("vlan", help="vlan interface config")
+    vlan_subparsers = vlan_parser.add_subparsers(dest="action")
+    vlan_create_parser = vlan_subparsers.add_parser("create", help="create a vlan sub-interface")
+    vlan_create_parser.add_argument("iface", help="parent interface name, e.g. eth0")
+    vlan_create_parser.add_argument("vid", type=int, help="vlan id, 1-4095")
+
     subparsers.add_parser("status", help="show current live network state")
     subparsers.add_parser("diff", help="compare config with live network state")
 
@@ -56,6 +68,16 @@ def main():
             cmd_route(args.iface, args.dst, args.gateway, args.replace)
         else:
             route_parser.print_help()
+    elif args.command == "bond":
+        if args.action == "create":
+            cmd_bond_create(args.name, args.slave)
+        else:
+            bond_parser.print_help()
+    elif args.command == "vlan":
+        if args.action == "create":
+            cmd_vlan_create(args.iface, args.vid)
+        else:
+            vlan_parser.print_help()
     elif args.command == "status":
         cmd_status()
     elif args.command == "diff":
@@ -166,6 +188,86 @@ def write_route(item, dst, gateway, replace=False):
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
     print(f"added route '{line}' to {item.name}")
+
+
+def cmd_bond_create(name, slaves):
+    item = NETWORK / name
+    if item.exists():
+        print(f"interface already exists: {name}")
+        sys.exit(1)
+
+    if len(set(slaves)) != len(slaves):
+        print(f"duplicate slave interfaces: {slaves}")
+        sys.exit(1)
+
+    for slave in slaves:
+        slave_item = NETWORK / slave
+        if not slave_item.is_dir():
+            print(f"interface not found: {slave}")
+            sys.exit(1)
+
+        if parse_ipv4address(slave_item) or parse_ipv4route(slave_item):
+            print(f"slave {slave} has address/route config, remove it first")
+            sys.exit(1)
+
+        master = find_bond_master(slave)
+        if master:
+            print(f"slave {slave} is already part of bond: {master}")
+            sys.exit(1)
+
+    item.mkdir()
+    lines = [
+        "TYPE=bond",
+        "BONDMODE=4",
+        f"HOST='{' '.join(slaves)}'",
+        "BOOTPROTO=static",
+    ]
+    path = item / "options"
+    path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+
+    print(f"created bond {name} with slaves: {', '.join(slaves)}")
+
+
+def find_bond_master(slave):
+    for item in NETWORK.iterdir():
+        if not item.is_dir():
+            continue
+        options = parse_options(item)
+        if options.get("TYPE") != "bond":
+            continue
+        host = options.get("HOST", "").strip("'\"")
+        if slave in host.split():
+            return item.name
+    return None
+
+
+def cmd_vlan_create(iface, vid):
+    parent = NETWORK / iface
+    if not parent.is_dir():
+        print(f"interface not found: {iface}")
+        sys.exit(1)
+
+    if not 1 <= vid <= 4095:
+        print(f"invalid vlan id: {vid} (must be 1-4095)")
+        sys.exit(1)
+
+    name = f"{iface}.{vid}"
+    item = NETWORK / name
+    if item.exists():
+        print(f"interface already exists: {name}")
+        sys.exit(1)
+
+    item.mkdir()
+    lines = [
+        "TYPE=vlan",
+        f"HOST={iface}",
+        f"VID={vid}",
+        "BOOTPROTO=static",
+    ]
+    path = item / "options"
+    path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+
+    print(f"created vlan {name} on {iface}")
 
 
 def cmd_status():

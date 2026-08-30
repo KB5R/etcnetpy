@@ -31,6 +31,10 @@ python3 main.py address add eth0 192.168.1.20/24 --replace
 
 python3 main.py route add eth0 default via 192.168.1.1
 python3 main.py route add eth0 192.168.2.0/24 via 192.168.1.254 --replace
+
+# create bonded and vlan interfaces
+python3 main.py bond create bond0 --slave eth0 eth1
+python3 main.py vlan create bond0 77
 ```
 
 Writes validate input (`ipaddress` stdlib module), detect no-op duplicates, and reject
@@ -46,11 +50,14 @@ than the real `/etc/net/ifaces/`.
 - `diff` — config vs live state, per interface
 - `address add <iface> <ip>/<mask> [--replace]`
 - `route add <iface> <dst> via <gateway> [--replace]`
+- `bond create <name> --slave <ifaces...>` — create a bonded interface (802.3ad / mode 4 only)
+- `vlan create <iface> <vid>` — create a VLAN sub-interface (`<iface>.<vid>`)
+
+`bond create` refuses if a slave is missing, already has an address/route, or already
+belongs to another bond. `vlan create` validates the VLAN id is in 1-4095.
 
 ## Roadmap
 
-- `bond create <name> --slave <ifaces...>` — create a bonded interface (802.3ad / mode 4)
-- `vlan create <iface> <vid>` — create a VLAN sub-interface
 - `iface up` / `iface down` — apply config via `ifup`/`ifdown`
 - `address del` / `route del`
 - atomic writes + backup before overwriting config files
