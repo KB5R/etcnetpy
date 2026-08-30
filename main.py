@@ -67,7 +67,9 @@ def main():
 def cmd_list():
     for item in NETWORK.iterdir():
         if item.is_dir():
-            print(item.name)
+            options = parse_options(item)
+            bootproto = options.get("BOOTPROTO", "unset")
+            print(f"{item.name} ({bootproto})")
 
 
 def cmd_show(iface_name):
