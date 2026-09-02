@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 import argparse
 import datetime
 import json
@@ -8,7 +9,7 @@ import sys
 from pathlib import Path
 import ipaddress
 
-NETWORK = Path('testdata/ifaces/')
+NETWORK = Path(os.environ.get('ETCNETPY_NETWORK_DIR', '/etc/net/ifaces/'))
 TRY_DIR = NETWORK.parent / "etcnetpy-try"
 
 # etcnet reserves these directory names for its own templates/fallback config,

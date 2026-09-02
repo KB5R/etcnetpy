@@ -54,8 +54,32 @@ missing/invalid interfaces or addresses with a non-zero exit code. When a write 
 overwrite an existing `ipv4address`/`ipv4route` file (`--replace`), the previous content
 is copied to `<file>.bak.<timestamp>` first.
 
-`NETWORK` currently points at `testdata/ifaces/` for local development/testing rather
-than the real `/etc/net/ifaces/`.
+`NETWORK` defaults to the real `/etc/net/ifaces/`. For local development/testing against
+the bundled fixtures, set `ETCNETPY_NETWORK_DIR=testdata/ifaces`:
+
+```sh
+ETCNETPY_NETWORK_DIR=testdata/ifaces python3 main.py iface list
+```
+
+## Packaging (RPM)
+
+`etcnetpy.spec` builds a `noarch` RPM for ALT Linux: a single stdlib-only script installed
+as `/usr/sbin/etcnetpy`, `Requires: /usr/bin/python3 /sbin/ifup /sbin/ifdown /sbin/service /sbin/ip`
+(i.e. the `etcnet` package). Build with `rpm-build` + `rpm-build-python3` (the latter is needed
+for `find-provides`/`find-requires` to process the Python shebang):
+
+```sh
+mkdir -p ~/RPM/{BUILD,RPMS,SRPMS,SPECS,SOURCES}
+tar -cf ~/RPM/SOURCES/etcnetpy-0.1.0.tar --transform 's,^,etcnetpy-0.1.0/,' main.py README.md LICENSE
+cp etcnetpy.spec ~/RPM/SPECS/
+cd ~/RPM/SPECS && rpmbuild -ba etcnetpy.spec
+```
+
+Built and smoke-tested inside a clean `alt:p10` container (avoids touching a real machine's
+package database): install pulls in `etcnet` correctly via the `Requires`, `etcnetpy --help`
+and `iface list` both work post-install, and `ETCNETPY_NETWORK_DIR` still overrides the
+`/etc/net/ifaces` default for testing. Note: `rpmbuild` refuses to run as root on ALT — build
+as a regular user.
 
 ## Current features
 
