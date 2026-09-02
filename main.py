@@ -1,11 +1,25 @@
 import argparse
+import datetime
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 import ipaddress
 
 NETWORK = Path('testdata/ifaces/')
+TRY_DIR = NETWORK.parent / "etcnetpy-try"
+
+# etcnet reserves these directory names for its own templates/fallback config,
+# they are not real network interfaces.
+RESERVED_IFACES = {"default", "unknown"}
+
+
+def iter_ifaces():
+    for item in NETWORK.iterdir():
+        if item.is_dir() and item.name not in RESERVED_IFACES:
+            yield item
 
 
 def main():
@@ -17,6 +31,11 @@ def main():
     iface_subparsers.add_parser("list", help="list interfaces from config")
     iface_show_parser = iface_subparsers.add_parser("show", help="show config for one interface")
     iface_show_parser.add_argument("iface", help="interface name, e.g. eth0")
+    iface_subparsers.add_parser("init", help="create default config for live interfaces missing from /etc/net/ifaces")
+    iface_up_parser = iface_subparsers.add_parser("up", help="apply interface config (ifup)")
+    iface_up_parser.add_argument("iface", help="interface name, e.g. eth0")
+    iface_down_parser = iface_subparsers.add_parser("down", help="bring interface down (ifdown)")
+    iface_down_parser.add_argument("iface", help="interface name, e.g. eth0")
 
     address_parser = subparsers.add_parser("address", help="ipv4 address config")
     address_subparsers = address_parser.add_subparsers(dest="action")
@@ -49,6 +68,10 @@ def main():
     subparsers.add_parser("status", help="show current live network state")
     subparsers.add_parser("diff", help="compare config with live network state")
 
+    try_parser = subparsers.add_parser("try", help="restart the whole network (service network restart), auto-revert to prior live state if not confirmed in time")
+    try_parser.add_argument("--timeout", type=int, default=120, help="seconds before auto-revert (default 120)")
+    subparsers.add_parser("confirm", help="confirm a pending 'try', keeping the change")
+
     args = parser.parse_args()
 
     if args.command == "iface":
@@ -56,6 +79,12 @@ def main():
             cmd_list()
         elif args.action == "show":
             cmd_show(args.iface)
+        elif args.action == "init":
+            cmd_iface_init()
+        elif args.action == "up":
+            cmd_iface_up(args.iface)
+        elif args.action == "down":
+            cmd_iface_down(args.iface)
         else:
             iface_parser.print_help()
     elif args.command == "address":
@@ -82,16 +111,19 @@ def main():
         cmd_status()
     elif args.command == "diff":
         cmd_diff()
+    elif args.command == "try":
+        cmd_try(args.timeout)
+    elif args.command == "confirm":
+        cmd_confirm()
     else:
         parser.print_help()
 
 
 def cmd_list():
-    for item in NETWORK.iterdir():
-        if item.is_dir():
-            options = parse_options(item)
-            bootproto = options.get("BOOTPROTO", "unset")
-            print(f"{item.name} ({bootproto})")
+    for item in iter_ifaces():
+        options = parse_options(item)
+        bootproto = options.get("BOOTPROTO", "unset")
+        print(f"{item.name} ({bootproto})")
 
 
 def cmd_show(iface_name):
@@ -106,6 +138,158 @@ def cmd_show(iface_name):
     print(f"ipv4route: {iface['ipv4route']}")
 
 
+def cmd_iface_init():
+    live_links = get_live_links()
+    existing = {item.name for item in iter_ifaces()}
+
+    missing = [
+        link for link in live_links
+        if link["type"] != "loopback" and link["name"] not in existing
+    ]
+
+    if not missing:
+        print("no missing interfaces found")
+        return
+
+    for link in missing:
+        name = link["name"]
+        item = NETWORK / name
+        item.mkdir()
+        lines = [
+            "BOOTPROTO=dhcp",
+            "TYPE=eth",
+            "DISABLED=no",
+        ]
+        path = item / "options"
+        path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+        print(f"created config for {name} (BOOTPROTO=dhcp)")
+
+
+def cmd_iface_up(iface_name):
+    item = NETWORK / iface_name
+    if not item.is_dir():
+        print(f"interface not found: {iface_name}")
+        sys.exit(1)
+
+    env = {**os.environ, 'VERBOSE': 'yes'}
+    result = subprocess.run(['ifup', iface_name], capture_output=True, text=True, env=env)
+    print(result.stdout, end='')
+    print(result.stderr, end='', file=sys.stderr)
+
+    if result.returncode == 2:
+        # ifup uses exit code 2 for both "already up" and "disabled" - the
+        # message above (printed via VERBOSE=yes) says which one it is.
+        return
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
+    print(f"{iface_name} up")
+
+
+def cmd_iface_down(iface_name):
+    item = NETWORK / iface_name
+    if not item.is_dir():
+        print(f"interface not found: {iface_name}")
+        sys.exit(1)
+
+    result = subprocess.run(['ifdown', iface_name], capture_output=True, text=True)
+    print(result.stdout, end='')
+    print(result.stderr, end='', file=sys.stderr)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
+    print(f"{iface_name} down")
+
+
+def get_all_live_addrs():
+    result = subprocess.run(
+        ['ip', '-j', 'addr', 'show'],
+        capture_output=True, text=True, check=True
+    )
+    interfaces = json.loads(result.stdout)
+    addrs = {}
+    for iface in interfaces:
+        name = iface['ifname']
+        if name == 'lo':
+            continue
+        addrs[name] = [
+            f"{a['local']}/{a['prefixlen']}" for a in iface.get('addr_info', [])
+            if a.get('family') == 'inet'
+        ]
+    return addrs
+
+
+def get_all_live_routes():
+    result = subprocess.run(
+        ['ip', '-j', 'route', 'show'],
+        capture_output=True, text=True, check=True
+    )
+    routes = json.loads(result.stdout)
+    return [r for r in routes if r.get('dev') and r.get('dev') != 'lo']
+
+
+def cmd_try(timeout):
+    # Record the live state of every interface *before* restarting - this,
+    # not any config file, is what gets restored if nobody confirms in time.
+    baseline_addrs = get_all_live_addrs()
+    baseline_routes = get_all_live_routes()
+
+    TRY_DIR.mkdir(exist_ok=True)
+    marker = TRY_DIR / "network.confirmed"
+    marker.unlink(missing_ok=True)
+
+    revert_lines = []
+    for name, addrs in baseline_addrs.items():
+        revert_lines.append(f'ip addr flush dev "{name}"')
+        for addr in addrs:
+            revert_lines.append(f'ip addr add {addr} dev "{name}"')
+    revert_lines.append('ip route flush table main')
+    for r in baseline_routes:
+        if r.get("gateway"):
+            revert_lines.append(f'ip route add {r["dst"]} via {r["gateway"]} dev "{r["dev"]}"')
+        else:
+            revert_lines.append(f'ip route add {r["dst"]} dev "{r["dev"]}"')
+
+    watcher = TRY_DIR / "network.watch.sh"
+    script = "\n".join([
+        "#!/bin/bash",
+        f'sleep {timeout}',
+        f'if [ ! -f "{marker}" ]; then',
+        *[f"  {line}" for line in revert_lines],
+        'fi',
+        f'rm -f "{marker}" "{watcher}"',
+    ]) + "\n"
+    watcher.write_text(script)
+
+    # Launch the watcher *before* restarting, detached from this process and
+    # this ssh session, so it still fires the revert even if the restart
+    # itself drops our connection.
+    subprocess.Popen(
+        ['bash', str(watcher)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+
+    result = subprocess.run(['service', 'network', 'restart'], capture_output=True, text=True)
+    print(result.stdout, end='')
+    print(result.stderr, end='', file=sys.stderr)
+
+    print(f"network restarted - run 'confirm' within {timeout}s or it will be reverted")
+
+
+def cmd_confirm():
+    watcher = TRY_DIR / "network.watch.sh"
+    if not watcher.is_file():
+        print("no pending try")
+        sys.exit(1)
+
+    marker = TRY_DIR / "network.confirmed"
+    marker.touch()
+    print("confirmed, changes kept")
+
+
 def cmd_address(iface_name, addr, replace=False):
     item = NETWORK / iface_name
     if not item.is_dir():
@@ -113,6 +297,15 @@ def cmd_address(iface_name, addr, replace=False):
         sys.exit(1)
 
     write_address(item, addr, replace)
+
+
+def backup_file(path):
+    if not path.is_file():
+        return
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = path.with_name(f"{path.name}.bak.{timestamp}")
+    shutil.copy2(path, backup_path)
 
 
 def write_address(item, addr, replace=False):
@@ -140,6 +333,7 @@ def write_address(item, addr, replace=False):
         lines = existing + [addr]
 
     path = item / "ipv4address"
+    backup_file(path)
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
     print(f"added {addr} to {item.name}")
@@ -185,6 +379,7 @@ def write_route(item, dst, gateway, replace=False):
         lines = existing_lines + [line]
 
     path = item / "ipv4route"
+    backup_file(path)
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
     print(f"added route '{line}' to {item.name}")
@@ -219,6 +414,7 @@ def cmd_bond_create(name, slaves):
     lines = [
         "TYPE=bond",
         "BONDMODE=4",
+        "BONDOPTIONS='miimon=100'",
         f"HOST='{' '.join(slaves)}'",
         "BOOTPROTO=static",
     ]
@@ -229,9 +425,7 @@ def cmd_bond_create(name, slaves):
 
 
 def find_bond_master(slave):
-    for item in NETWORK.iterdir():
-        if not item.is_dir():
-            continue
+    for item in iter_ifaces():
         options = parse_options(item)
         if options.get("TYPE") != "bond":
             continue
@@ -287,10 +481,7 @@ def cmd_diff():
     live_addresses = get_live_addresses()
     live_routes = get_live_routes()
 
-    for item in NETWORK.iterdir():
-        if not item.is_dir():
-            continue
-
+    for item in iter_ifaces():
         name = item.name
         iface = read_iface(item)
 
@@ -419,6 +610,17 @@ def parse_route_line(line):
         gateway = tokens[via_index + 1]
 
     return {"dst": dst, "gateway": gateway}
+
+
+def get_live_links():
+    result = subprocess.run(
+        ['ip', '-j', 'link', 'show'],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    links = json.loads(result.stdout)
+    return [{"name": link["ifname"], "type": link["link_type"]} for link in links]
 
 
 def get_live_addresses():
