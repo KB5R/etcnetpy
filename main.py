@@ -178,6 +178,10 @@ def menu_iface_down():
         cmd_iface_down(iface)
 
 
+def print_not_applied_notice():
+    print("⚠ конфиг записан, но НЕ применён - используй 4) up или 12) try, чтобы применить")
+
+
 def menu_address_add():
     iface = choose_iface("На какой интерфейс добавить адрес")
     if not iface:
@@ -188,6 +192,7 @@ def menu_address_add():
         return
     replace = prompt_yes_no("Заменить существующие адреса вместо добавления?")
     cmd_address(iface, ip, replace)
+    print_not_applied_notice()
 
 
 def menu_route_add():
@@ -201,6 +206,7 @@ def menu_route_add():
         return
     replace = prompt_yes_no("Заменить существующие маршруты вместо добавления?")
     cmd_route(iface, dst, gateway, replace)
+    print_not_applied_notice()
 
 
 def menu_bond_create():
@@ -227,6 +233,7 @@ def menu_bond_create():
         else:
             slaves.append(token)
     cmd_bond_create(name, slaves)
+    print_not_applied_notice()
 
 
 def menu_vlan_create():
@@ -238,6 +245,7 @@ def menu_vlan_create():
         print("отменено")
         return
     cmd_vlan_create(iface, int(vid_raw))
+    print_not_applied_notice()
 
 
 def menu_try():
@@ -449,6 +457,10 @@ def cmd_try(timeout):
     print(result.stdout, end='')
     print(result.stderr, end='', file=sys.stderr)
 
+    if result.returncode != 0:
+        print(f"network restart FAILED (exit {result.returncode}) - safety watcher will still revert to the prior state in {timeout}s")
+        sys.exit(result.returncode)
+
     print(f"network restarted - run 'confirm' within {timeout}s or it will be reverted")
 
 
@@ -509,7 +521,26 @@ def write_address(item, addr, replace=False):
     backup_file(path)
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
+    # etcnet only reads ipv4address for BOOTPROTO=static (or a dhcp-static
+    # fallback that never applies it while DHCP is working) - plain
+    # BOOTPROTO=dhcp ignores the file entirely, so the address would never
+    # actually get applied by ifup/try without this.
+    if parse_options(item).get("BOOTPROTO") == "dhcp":
+        set_bootproto_static(item)
+        print(f"BOOTPROTO changed from dhcp to static on {item.name} (etcnet ignores ipv4address otherwise)")
+
     print(f"added {addr} to {item.name}")
+
+
+def set_bootproto_static(item):
+    path = item / "options"
+    lines = path.read_text(encoding='utf-8').splitlines()
+    lines = [
+        "BOOTPROTO=static" if line.strip().startswith("BOOTPROTO=") else line
+        for line in lines
+    ]
+    backup_file(path)
+    path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
 
 def cmd_route(iface_name, dst, gateway, replace=False):
@@ -537,21 +568,24 @@ def write_route(item, dst, gateway, replace=False):
 
     line = route_core({"dst": dst, "gateway": gateway})
 
-    existing_routes = parse_ipv4route(item)
-    existing_lines = [route_core(route) for route in existing_routes]
+    # Duplicate-detection only compares dst+gateway (via parse_ipv4route/
+    # route_core); the actual file content to keep comes from the raw lines
+    # so extra fields on other routes (metric, table, ...) survive untouched.
+    existing_lines_core = [route_core(route) for route in parse_ipv4route(item)]
+    path = item / "ipv4route"
+    existing_raw = read_raw_lines(path)
 
     if replace:
-        if existing_lines == [line]:
+        if existing_lines_core == [line]:
             print(f"route already present: {line}")
             return
         lines = [line]
     else:
-        if line in existing_lines:
+        if line in existing_lines_core:
             print(f"route already present: {line}")
             return
-        lines = existing_lines + [line]
+        lines = existing_raw + [line]
 
-    path = item / "ipv4route"
     backup_file(path)
     path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
@@ -572,6 +606,13 @@ def cmd_bond_create(name, slaves):
         slave_item = NETWORK / slave
         if not slave_item.is_dir():
             print(f"interface not found: {slave}")
+            sys.exit(1)
+
+        # BOOTPROTO=dhcp interfaces never have an ipv4address/ipv4route file
+        # (etcnet doesn't need one to run DHCP), so the check below would
+        # miss a slave that's actively holding a live DHCP-assigned address.
+        if "dhcp" in parse_options(slave_item).get("BOOTPROTO", ""):
+            print(f"slave {slave} is BOOTPROTO=dhcp (still getting a live address) - set it to static first")
             sys.exit(1)
 
         if parse_ipv4address(slave_item) or parse_ipv4route(slave_item):
@@ -666,11 +707,10 @@ def cmd_diff():
 
 
 def diff_addresses(iface, live_addrs):
-    config_ips = set()
-    for addr in iface["ipv4address"]:
-        ip, _, _ = addr.partition("/")
-        config_ips.add(ip)
-
+    # Compare full ip/mask, not just the bare ip - a config line can carry
+    # trailing modifiers (e.g. "192.168.1.5/24 broadcast +"), so only the
+    # first token is the actual address/mask.
+    config_ips = {addr.split()[0] for addr in iface["ipv4address"]}
     live_ips = set(live_addrs)
 
     missing = config_ips - live_ips
@@ -745,6 +785,12 @@ def parse_options(item):
     return result
 
 
+def read_raw_lines(path):
+    if not path.is_file():
+        return []
+    return [line.strip() for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+
+
 def parse_ipv4address(item):
     path_ipv4address = item / "ipv4address"
     if not path_ipv4address.is_file():
@@ -809,7 +855,7 @@ def get_live_addresses():
     for iface in interfaces:
         name = iface['ifname']
         addresses[name] = [
-            a['local'] for a in iface.get('addr_info', [])
+            f"{a['local']}/{a['prefixlen']}" for a in iface.get('addr_info', [])
             if a.get('family') == 'inet'
         ]
     return addresses
