@@ -24,7 +24,10 @@ def iter_ifaces():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="etcnetpy - network configuration for /etc/net")
+    parser = argparse.ArgumentParser(
+        description="etcnetpy - network configuration for /etc/net",
+        epilog="run with no arguments (or 'menu') for an interactive menu",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     iface_parser = subparsers.add_parser("iface", help="interface config")
@@ -73,6 +76,8 @@ def main():
     try_parser.add_argument("--timeout", type=int, default=120, help="seconds before auto-revert (default 120)")
     subparsers.add_parser("confirm", help="confirm a pending 'try', keeping the change")
 
+    subparsers.add_parser("menu", help="interactive menu (also runs by default with no arguments)")
+
     args = parser.parse_args()
 
     if args.command == "iface":
@@ -116,8 +121,175 @@ def main():
         cmd_try(args.timeout)
     elif args.command == "confirm":
         cmd_confirm()
+    elif args.command == "menu" or args.command is None:
+        run_menu()
     else:
         parser.print_help()
+
+
+def prompt(message, default=None):
+    suffix = f" [{default}]" if default else ""
+    try:
+        value = input(f"{message}{suffix}: ").strip()
+    except EOFError:
+        return None
+    return value or default
+
+
+def prompt_yes_no(message, default_no=True):
+    hint = "y/N" if default_no else "Y/n"
+    answer = prompt(f"{message} ({hint})", "")
+    if answer is None:
+        return False
+    return answer.strip().lower().startswith("y")
+
+
+def choose_iface(message):
+    ifaces = sorted(item.name for item in iter_ifaces())
+    if not ifaces:
+        print("нет настроенных интерфейсов (сначала 'iface init' или создайте вручную)")
+        return None
+
+    for i, name in enumerate(ifaces, 1):
+        print(f"  {i}) {name}")
+    choice = prompt(f"{message} (номер или имя)")
+    if not choice:
+        return None
+    if choice.isdigit() and 1 <= int(choice) <= len(ifaces):
+        return ifaces[int(choice) - 1]
+    return choice
+
+
+def menu_iface_show():
+    iface = choose_iface("Какой интерфейс показать")
+    if iface:
+        cmd_show(iface)
+
+
+def menu_iface_up():
+    iface = choose_iface("Какой интерфейс поднять")
+    if iface:
+        cmd_iface_up(iface)
+
+
+def menu_iface_down():
+    iface = choose_iface("Какой интерфейс опустить")
+    if iface:
+        cmd_iface_down(iface)
+
+
+def menu_address_add():
+    iface = choose_iface("На какой интерфейс добавить адрес")
+    if not iface:
+        return
+    ip = prompt("IP-адрес с маской, например 192.168.1.10/24")
+    if not ip:
+        print("отменено")
+        return
+    replace = prompt_yes_no("Заменить существующие адреса вместо добавления?")
+    cmd_address(iface, ip, replace)
+
+
+def menu_route_add():
+    iface = choose_iface("На какой интерфейс добавить маршрут")
+    if not iface:
+        return
+    dst = prompt("Назначение, например default или 192.168.2.0/24", "default")
+    gateway = prompt("Шлюз, например 192.168.1.1")
+    if not gateway:
+        print("отменено")
+        return
+    replace = prompt_yes_no("Заменить существующие маршруты вместо добавления?")
+    cmd_route(iface, dst, gateway, replace)
+
+
+def menu_bond_create():
+    name = prompt("Имя bond-интерфейса, например bond0")
+    if not name:
+        print("отменено")
+        return
+
+    ifaces = sorted(item.name for item in iter_ifaces())
+    if not ifaces:
+        print("нет интерфейсов для объединения в bond")
+        return
+    for i, n in enumerate(ifaces, 1):
+        print(f"  {i}) {n}")
+    raw = prompt("Интерфейсы-слейвы через пробел (номера или имена)")
+    if not raw:
+        print("отменено")
+        return
+
+    slaves = []
+    for token in raw.split():
+        if token.isdigit() and 1 <= int(token) <= len(ifaces):
+            slaves.append(ifaces[int(token) - 1])
+        else:
+            slaves.append(token)
+    cmd_bond_create(name, slaves)
+
+
+def menu_vlan_create():
+    iface = choose_iface("Родительский интерфейс")
+    if not iface:
+        return
+    vid_raw = prompt("VLAN ID (1-4095)")
+    if not vid_raw or not vid_raw.isdigit():
+        print("отменено")
+        return
+    cmd_vlan_create(iface, int(vid_raw))
+
+
+def menu_try():
+    timeout_raw = prompt("Таймаут авто-отката в секундах", "120")
+    timeout = int(timeout_raw) if timeout_raw and timeout_raw.isdigit() else 120
+    cmd_try(timeout)
+
+
+def run_menu():
+    actions = [
+        ("Список интерфейсов", cmd_list),
+        ("Показать интерфейс", menu_iface_show),
+        ("Создать конфиги для интерфейсов без них (init)", cmd_iface_init),
+        ("Поднять интерфейс (up)", menu_iface_up),
+        ("Опустить интерфейс (down)", menu_iface_down),
+        ("Добавить IP-адрес", menu_address_add),
+        ("Добавить маршрут", menu_route_add),
+        ("Создать bond", menu_bond_create),
+        ("Создать vlan", menu_vlan_create),
+        ("Текущее состояние сети (status)", cmd_status),
+        ("Сравнить конфиг с реальным состоянием (diff)", cmd_diff),
+        ("Применить с автооткатом (try)", menu_try),
+        ("Подтвердить изменения (confirm)", cmd_confirm),
+    ]
+
+    while True:
+        print("\n=== etcnetpy ===")
+        for i, (label, _) in enumerate(actions, 1):
+            print(f"  {i}) {label}")
+        print("  0) Выход")
+
+        try:
+            choice = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if choice == "0":
+            return
+        if not choice.isdigit() or not (1 <= int(choice) <= len(actions)):
+            print("нет такого пункта")
+            continue
+
+        _, action = actions[int(choice) - 1]
+        try:
+            action()
+        except SystemExit:
+            pass
+        except KeyboardInterrupt:
+            print("\nотменено")
+        except Exception as e:
+            print(f"ошибка: {e}")
 
 
 def cmd_list():
