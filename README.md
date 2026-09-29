@@ -70,7 +70,7 @@ for `find-provides`/`find-requires` to process the Python shebang):
 
 ```sh
 mkdir -p ~/RPM/{BUILD,RPMS,SRPMS,SPECS,SOURCES}
-tar -cf ~/RPM/SOURCES/etcnetpy-0.1.0.tar --transform 's,^,etcnetpy-0.1.0/,' main.py README.md LICENSE
+tar -cf ~/RPM/SOURCES/etcnetpy-0.2.0.tar --transform 's,^,etcnetpy-0.2.0/,' main.py README.md LICENSE
 cp etcnetpy.spec ~/RPM/SPECS/
 cd ~/RPM/SPECS && rpmbuild -ba etcnetpy.spec
 ```

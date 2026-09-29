@@ -1,5 +1,5 @@
 Name: etcnetpy
-Version: 0.1.0
+Version: 0.2.0
 Release: alt1
 
 Summary: nmcli-style CLI for etcnet (/etc/net) network configuration
@@ -40,5 +40,15 @@ install -m755 main.py %buildroot%_sbindir/etcnetpy
 %doc README.md LICENSE
 
 %changelog
+* Tue Sep 29 2026 Freeman <mihail.ku.88@gmail.com> 0.2.0-alt1
+- add interactive menu (run with no arguments, or 'menu')
+- fix: address add now switches BOOTPROTO dhcp->static so ipv4address
+  actually gets applied by etcnet (was silently ignored before)
+- fix: route add no longer drops extra fields (metric, table, ...) from
+  existing routes when appending a new one
+- fix: bond create rejects slaves still on BOOTPROTO=dhcp
+- fix: diff now compares full ip/mask instead of bare ip
+- fix: try now checks the return code of 'service network restart'
+
 * Tue Sep 02 2026 Freeman <mihail.ku.88@gmail.com> 0.1.0-alt1
 - initial build
